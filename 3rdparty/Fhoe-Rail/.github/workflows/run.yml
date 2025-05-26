@@ -1,0 +1,79 @@
+name: Generate application
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.py'
+permissions:
+  contents: write
+jobs:
+  build:
+    name: Build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          submodules: 'false'
+
+      - name: Set up python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11.5'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Generate program
+        run: |
+          pyinstaller -D --distpath .\dist\ -i .\logo.ico --contents-directory libraries --uac-admin -n "Fhoe-Rail" fhoe.py -y
+
+      - name: Create batch files
+        run: |
+          $debugBatContent = @"
+          @echo off
+          .\Fhoe-Rail.exe --debug
+          "@
+          $debugBatContent | Out-File -FilePath "自选地图.bat" -Encoding ASCII
+
+          $recordBatContent = @"
+          @echo off
+          .\Fhoe-Rail.exe --record
+          "@
+          $recordBatContent | Out-File -FilePath "录制地图.bat" -Encoding ASCII
+
+      - name: Move assets to dist directory
+        run: |
+          xcopy /E /I /Y .\map\ .\dist\Fhoe-Rail\map\
+          xcopy /E /I /Y .\新图注意事项\ .\dist\Fhoe-Rail\新图注意事项\
+          xcopy /E /I /Y .\picture\ .\dist\Fhoe-Rail\picture\
+          xcopy /Y .\自选地图.bat .\dist\Fhoe-Rail\
+          xcopy /Y .\录制地图.bat .\dist\Fhoe-Rail\
+          xcopy /Y .\README.md .\dist\Fhoe-Rail\
+
+      - name: Upload artifact
+        if: startsWith(github.ref, 'refs/heads/') || startsWith(github.ref, 'refs/pull/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fhoe-Rail
+          path: .\dist\Fhoe-Rail\
+
+      - name: Create zip archive
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          $tag = git describe --tags --abbrev=0
+          [System.IO.File]::WriteAllText(".\dist\Fhoe-Rail\version.txt", $tag)
+          powershell Compress-Archive -Path .\dist\Fhoe-Rail\ -DestinationPath .\dist\Fhoe-Rail.zip -Force
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+#          name: Fhoe-Rail
+          files: |
+           ./dist/Fhoe-Rail.zip
+#          prerelease: true
+

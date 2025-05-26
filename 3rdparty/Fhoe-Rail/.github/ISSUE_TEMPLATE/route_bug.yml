@@ -1,0 +1,31 @@
+name: 🧐路线异常
+description: 自动寻路过程中出现路线偏离或异常
+labels: ["map issue / 地图路线"]
+title: "[路线错误] "
+body:
+  - type: textarea
+    id: bug
+    attributes:
+      label: 问题描述
+      description: |
+        请详细说明遇到的路线问题，包括以下信息：
+        1. 出现问题使用的脚本版本
+        2. 使用的地图版本（default或Huangquan）
+        3. 出现问题的地图位置（如：黑塔空间站）
+        4. 异常现象的具体表现（如：角色偏离预期路线、卡住不动等）
+        5. 问题是否必现，以及复现的具体步骤
+        6. 请附上问题发生时的截图或录屏
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志文件
+      description: |
+        请提供问题发生时的完整日志文件：
+        - 默认日志位置：logs文件夹下的日志文件
+        - 三月七用户：\3rdparty\Fhoe-Rail\logs下的日志文件
+        - 如无法提供完整日志，请至少提供问题发生前后至少1分钟的日志内容
+      placeholder: 点击文本框下面小长条可以上传文件
+    validations:
+      required: true

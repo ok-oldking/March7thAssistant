@@ -1,0 +1,28 @@
+{
+    "name": "黑塔办公室-1",
+    "author": "lrwy",
+    "start": [
+        {
+            "main": 1
+        },
+        {
+            "F4": 1.5
+        },
+        {
+            "picture\\index_2.png": 1.5
+        },
+        {
+            "picture\\index_3.png": 1.5
+        },
+        {
+            "picture\\index_4.png": 1.5
+        },
+        {
+            "await": 2
+        },
+        {
+            "main": 1
+        }
+    ],
+    "map": []
+}
