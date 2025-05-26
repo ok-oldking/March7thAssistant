@@ -1,0 +1,70 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Run every day at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual trigger
+  push:
+    branches:
+      "*"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history for accurate merging
+          fetch-depth: 0
+          # Get the PAT from secrets to allow pushing
+          token: ${{ secrets.PAT }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream ${{ github.event.repository.parent.clone_url }}
+          git remote -v
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Merge upstream with override
+        run: |
+          git merge -X theirs upstream/${{ github.event.repository.default_branch }} --allow-unrelated-histories
+
+      - name: Check for and process submodules
+        id: process_submodules
+        run: |
+          if [ -f .gitmodules ]; then
+            echo "Detected .gitmodules file. Processing submodules."
+            git submodule update --init --recursive
+            git rm --cached .gitmodules || true  # Remove from index, allow failure if not tracked
+            rm -f .gitmodules                    # Delete the file
+            git add .
+            git status
+            echo "::set-output name=submodules_processed::true"
+          else
+            echo "No .gitmodules file found."
+            echo "::set-output name=submodules_processed::false"
+          fi
+
+      - name: Commit and push changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .
+          git status
+          # Check if there are any changes to commit
+          if ! git diff --cached --exit-code; then
+            git commit -m "Sync with upstream ${{ github.event.repository.parent.full_name }}"
+            git push origin ${{ github.event.repository.default_branch }}
+            echo "Successfully synced and pushed changes."
+          else
+            echo "No changes to commit after sync."
+          fi
+        env:
+          # Use the PAT with the push command
+          GITHUB_TOKEN: ${{ secrets.PAT }}
+
