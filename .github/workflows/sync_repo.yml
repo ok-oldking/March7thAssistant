@@ -75,8 +75,7 @@ jobs:
           token: ${{ secrets.WORKFLOW }} # Use the PAT for checkout
           ref: ${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}
           fetch-depth: 0
-          submodules: 'recursive'
-          # token: ${{ secrets.YOUR_PAT_FOR_UPSTREAM }}
+          submodules: false
 
       - name: Configure Git User
         run: |
