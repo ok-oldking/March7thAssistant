@@ -31,7 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      workflows: write
 
     steps:
       - name: Determine Sync Parameters
@@ -73,6 +72,7 @@ jobs:
       - name: Checkout Fork
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.WORKFLOW }} # Use the PAT for checkout
           ref: ${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}
           fetch-depth: 0
           submodules: 'recursive'
@@ -165,15 +165,10 @@ jobs:
         run: echo "No branch changes were committed, so no branch push is necessary."
 
       - name: Push Synced Tags to Fork
-        # This step runs regardless of whether new commits were made to the branch,
-        # because upstream might have new tags pointing to existing commits.
-        # The 'Fetch from Upstream' step already updated local tags from upstream.
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW }} # Make PAT available as an env var
         run: |
-          echo "Pushing all local tags (synced from upstream) to origin..."
-          # This pushes all local tags to the 'origin' remote (your fork).
-          # If a tag on 'origin' has the same name as a local tag (from upstream)
-          # but points to a different commit, and the update is not a fast-forward,
-          # the push for that specific tag might be rejected by the remote.
-          # To force overwrite tags on your fork with the upstream versions, use:
-          # git push origin --tags --force
-          git push origin --tags
+          echo "Pushing all local tags (synced from upstream) to origin using PAT..."
+          # Configure remote with PAT for this push command (might be redundant if set above and not reset)
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push origin --tags # Add --force if you need to overwrite tags
