@@ -8,32 +8,29 @@ on:
         required: true
         default: 'main'
       upstream_repo_url:
-        description: 'Full URL of the parent/upstream repository (e.g., https://github.com/parent/repo.git)'
+        description: 'Full URL of the parent/upstream repository'
         required: true
+        default: 'https://github.com/moesnow/March7thAssistant'
       upstream_branch:
-        description: 'Branch in the upstream repo to sync from (e.g., main, master)'
-        required: false # If empty, defaults to the same name as `branch` input
+        description: 'Branch in the upstream repo to sync from (e.g., main, master). If empty, uses the fork branch name.'
+        required: false
+        default: 'main'
   schedule:
-    # Example: Run daily at 03:00 UTC. Adjust as needed.
     - cron: '0 3 * * *'
   push:
     branches:
-      "*"
+      - main
 
 env:
-  # Define defaults for scheduled runs.
-  # For workflow_dispatch, these will be overridden by inputs if provided.
-  # IMPORTANT: For scheduled runs, UPSTREAM_REPO_URL_SCHEDULED MUST be set.
-  # It's highly recommended to use a repository secret for UPSTREAM_REPO_URL_SCHEDULED.
-  BRANCH_SCHEDULED: 'main'
-  # UPSTREAM_REPO_URL_SCHEDULED: 'https://github.com/parent/repo.git' # Or set via secrets.UPSTREAM_REPO_URL_SCHEDULED
-  # UPSTREAM_BRANCH_SCHEDULED: 'main' # Or set via secrets.UPSTREAM_BRANCH_SCHEDULED, or let it default to BRANCH_SCHEDULED
+  DEFAULT_BRANCH: 'main'
+  DEFAULT_UPSTREAM_REPO_URL: 'https://github.com/moesnow/March7thAssistant'
+  DEFAULT_UPSTREAM_BRANCH: 'main'
 
 jobs:
   sync_and_process:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # To push changes back to this fork
+      contents: write
 
     steps:
       - name: Determine Sync Parameters
@@ -42,24 +39,32 @@ jobs:
           _branch=""
           _upstream_repo_url=""
           _upstream_branch=""
-
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref name: ${{ github.ref_name }}"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             _branch="${{ github.event.inputs.branch }}"
             _upstream_repo_url="${{ github.event.inputs.upstream_repo_url }}"
-            _upstream_branch="${{ github.event.inputs.upstream_branch || github.event.inputs.branch }}" # Default to same as local branch
+            _upstream_branch="${{ github.event.inputs.upstream_branch || github.event.inputs.branch }}"
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            _branch="${{ env.BRANCH_SCHEDULED }}"
-            _upstream_repo_url="${{ secrets.UPSTREAM_REPO_URL_SCHEDULED || env.UPSTREAM_REPO_URL_SCHEDULED }}"
-            _upstream_branch="${{ secrets.UPSTREAM_BRANCH_SCHEDULED || env.UPSTREAM_BRANCH_SCHEDULED || env.BRANCH_SCHEDULED }}" # Default to same as local branch
+            _branch="${{ env.DEFAULT_BRANCH }}"
+            _upstream_repo_url="${{ env.DEFAULT_UPSTREAM_REPO_URL }}"
+            _upstream_branch="${{ env.DEFAULT_UPSTREAM_BRANCH }}"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            if [[ "${{ github.ref_name }}" == "${{ env.DEFAULT_BRANCH }}" ]]; then
+              _branch="${{ github.ref_name }}"
+              _upstream_repo_url="${{ env.DEFAULT_UPSTREAM_REPO_URL }}"
+              _upstream_branch="${{ env.DEFAULT_UPSTREAM_BRANCH }}"
+            else
+              echo "Push event to non-default branch (${{ github.ref_name }}). Workflow configured for ${{ env.DEFAULT_BRANCH }}. Skipping."
+              exit 0
+            fi
           else
             echo "::error::Unsupported event type: ${{ github.event_name }}"
             exit 1
           fi
-
           if [[ -z "$_branch" ]]; then echo "::error::Target branch is not defined."; exit 1; fi
           if [[ -z "$_upstream_repo_url" ]]; then echo "::error::Upstream repository URL is not defined."; exit 1; fi
           if [[ -z "$_upstream_branch" ]]; then echo "::error::Upstream branch is not defined."; exit 1; fi
-
           echo "BRANCH_TO_SYNC=$_branch" >> $GITHUB_OUTPUT
           echo "UPSTREAM_REPO_URL=$_upstream_repo_url" >> $GITHUB_OUTPUT
           echo "UPSTREAM_BRANCH=$_upstream_branch" >> $GITHUB_OUTPUT
@@ -68,13 +73,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}
-          # Fetch all history for all branches and tags for proper merging
           fetch-depth: 0
-          # Initialize and update submodules recursively. This ensures their content is available.
           submodules: 'recursive'
-          # The default GITHUB_TOKEN is used, which has write access to this fork.
-          # If upstream is private and in a different org, you might need a PAT for fetching.
-          # token: ${{ secrets.YOUR_PAT_FOR_UPSTREAM }} # Only if needed for fetching upstream
+          # token: ${{ secrets.YOUR_PAT_FOR_UPSTREAM }}
 
       - name: Configure Git User
         run: |
@@ -84,11 +85,13 @@ jobs:
       - name: Add Upstream Remote
         run: |
           git remote add upstream ${{ steps.sync_params.outputs.UPSTREAM_REPO_URL }} || echo "Upstream remote already exists or failed to add."
-          git remote -v # Verify
+          git remote -v
 
-      - name: Fetch from Upstream
+      - name: Fetch from Upstream (including all tags)
         run: |
-          git fetch upstream --tags --force # Fetch all tags and branches
+          echo "Fetching all tags from upstream and forcing local update..."
+          git fetch upstream --tags --force
+          echo "Fetching upstream branch ${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}..."
           git fetch upstream ${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}
 
       - name: Merge Upstream (Prefer Upstream on Conflict)
@@ -96,12 +99,8 @@ jobs:
           BRANCH="${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}"
           UPSTREAM_BRANCH="${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}"
           echo "Merging upstream/${UPSTREAM_BRANCH} into ${BRANCH}..."
-          # -X theirs: For any conflicting hunks, prefer the version from 'their' branch (upstream).
-          # --no-commit: We want to handle submodules before the final commit.
-          # --allow-unrelated-histories: Useful if the fork history diverged significantly.
           git merge "upstream/${UPSTREAM_BRANCH}" -X theirs --no-ff --no-commit --allow-unrelated-histories
           echo "Merge command executed. Check for conflicts if any were not auto-resolved by -X theirs."
-          # If merge fails catastrophically (e.g., branch doesn't exist), the script will exit here.
 
       - name: Flatten Submodules
         id: flatten_submodules
@@ -109,51 +108,40 @@ jobs:
           echo "Attempting to flatten submodules..."
           if [ ! -f ".gitmodules" ]; then
             echo "No .gitmodules file found. Skipping submodule flattening."
-            echo "changes_made=false" >> $GITHUB_OUTPUT
+            echo "changes_made_in_flatten=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           SUBMODULE_PATHS=$(git config --file .gitmodules --get-regexp path | awk '{ print $2 }')
           if [ -z "$SUBMODULE_PATHS" ]; then
             echo "No submodule paths found in .gitmodules though file exists. Skipping."
-            echo "changes_made=false" >> $GITHUB_OUTPUT
+            echo "changes_made_in_flatten=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           echo "De-initializing submodules..."
           git submodule deinit --all -f
-
           for path in $SUBMODULE_PATHS; do
             echo "Removing .git directory from submodule at $path"
-            if [ -d "$path/.git" ]; then # Check if it's a directory (old submodule style)
+            if [ -d "$path/.git" ]; then
               rm -rf "$path/.git"
-            elif [ -f "$path/.git" ]; then # Check if it's a file (new submodule style, points to .git/modules)
+            elif [ -f "$path/.git" ]; then
               rm -f "$path/.git"
-              # Optionally, also remove the corresponding entry from .git/modules/$path
-              # For flattening, just removing the .git file/dir in submodule path is key.
             fi
             echo "Staging content of former submodule at $path"
             git add "$path"
           done
-
           echo "Removing .gitmodules file..."
-          git rm .gitmodules # Use git rm to stage its removal
-
+          git rm .gitmodules
           echo "Submodule flattening process completed."
-          echo "changes_made=true" >> $GITHUB_OUTPUT
+          echo "changes_made_in_flatten=true" >> $GITHUB_OUTPUT
 
       - name: Commit Changes
         id: commit
         run: |
-          BRANCH="${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}"
-          # Check if there are any staged changes (from merge or submodule flattening)
           if git diff --quiet --cached && git diff --quiet; then
             echo "No changes to commit after merge and submodule processing."
             echo "committed=false" >> $GITHUB_OUTPUT
           else
-            # Add any potentially unstaged changes (though merge with --no-commit should stage, and flatten does git add)
             git add -A
-            # Check again if anything was actually added
             if git diff --quiet --cached; then
                 echo "No changes to commit even after 'git add -A'."
                 echo "committed=false" >> $GITHUB_OUTPUT
@@ -164,18 +152,27 @@ jobs:
             fi
           fi
 
-      - name: Push Changes
+      - name: Push Branch Changes
         if: steps.commit.outputs.committed == 'true'
         run: |
           BRANCH="${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}"
-          echo "Pushing changes to origin/${BRANCH}..."
+          echo "Pushing branch changes to origin/${BRANCH}..."
           git push origin "${BRANCH}"
-          # If the history has been rewritten (e.g., by a rebase, though we used merge),
-          # a force push might be needed: git push --force origin "${BRANCH}"
-          # However, with merge -X theirs, a force push should typically not be required unless
-          # the local branch was already diverged in a way that requires rewriting its history
-          # to align with upstream even after merge. Use with caution.
 
-      - name: No Changes to Push
+      - name: No Branch Changes to Push
         if: steps.commit.outputs.committed == 'false'
-        run: echo "No changes were committed, so no push is necessary."
+        run: echo "No branch changes were committed, so no branch push is necessary."
+
+      - name: Push Synced Tags to Fork
+        # This step runs regardless of whether new commits were made to the branch,
+        # because upstream might have new tags pointing to existing commits.
+        # The 'Fetch from Upstream' step already updated local tags from upstream.
+        run: |
+          echo "Pushing all local tags (synced from upstream) to origin..."
+          # This pushes all local tags to the 'origin' remote (your fork).
+          # If a tag on 'origin' has the same name as a local tag (from upstream)
+          # but points to a different commit, and the update is not a fast-forward,
+          # the push for that specific tag might be rejected by the remote.
+          # To force overwrite tags on your fork with the upstream versions, use:
+          # git push origin --tags --force
+          git push origin --tags
