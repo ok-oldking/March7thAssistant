@@ -1,0 +1,9 @@
+requires_python:
+  "3.12"
+profiles:
+  - name: "default"
+    main_script: "main.py"
+    admin: true
+    requirements: "requirements.txt"
+
+
