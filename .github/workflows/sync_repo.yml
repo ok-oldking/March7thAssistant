@@ -36,6 +36,7 @@ jobs:
       - name: Determine Sync Parameters
         id: sync_params
         run: |
+          # ... (parameter determination logic remains the same) ...
           _branch=""
           _upstream_repo_url=""
           _upstream_branch=""
@@ -50,15 +51,13 @@ jobs:
             _upstream_repo_url="${{ env.DEFAULT_UPSTREAM_REPO_URL }}"
             _upstream_branch="${{ env.DEFAULT_UPSTREAM_BRANCH }}"
           elif [[ "${{ github.event_name }}" == "push" ]]; then
-            # Only run on push to the specified default branch for safety,
-            # or if you want to sync other branches, adjust this logic.
             if [[ "${{ github.ref_name }}" == "${{ env.DEFAULT_BRANCH }}" ]]; then
               _branch="${{ github.ref_name }}"
               _upstream_repo_url="${{ env.DEFAULT_UPSTREAM_REPO_URL }}"
               _upstream_branch="${{ env.DEFAULT_UPSTREAM_BRANCH }}"
             else
               echo "Push event to non-default branch (${{ github.ref_name }}). Workflow configured for ${{ env.DEFAULT_BRANCH }}. Skipping."
-              exit 0 # Use 78 for neutral exit if you prefer
+              exit 0 
             fi
           else
             echo "::error::Unsupported event type: ${{ github.event_name }}"
@@ -74,10 +73,10 @@ jobs:
       - name: Checkout Fork
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.WORKFLOW }} # Use a PAT with repo write access
+          token: ${{ secrets.WORKFLOW }} 
           ref: ${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}
-          fetch-depth: 0 # Needed for merge history and tags
-          submodules: false # We will handle submodules manually
+          fetch-depth: 0 
+          submodules: false 
 
       - name: Configure Git User
         run: |
@@ -91,26 +90,22 @@ jobs:
 
       - name: Fetch from Upstream (including all tags)
         run: |
-          echo "Fetching all tags from upstream and forcing local update..."
           git fetch upstream --tags --force
-          echo "Fetching upstream branch ${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}..."
           git fetch upstream ${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}
 
       - name: Prepare Temporary Upstream Clone for Submodule Info
-        id: prep_upstream_clone # Renamed for clarity, similar to before
+        id: prep_upstream_clone
         run: |
+          # ... (logic remains the same) ...
           UPSTREAM_REPO_URL="${{ steps.sync_params.outputs.UPSTREAM_REPO_URL }}"
           UPSTREAM_BRANCH="${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}"
           TEMP_UPSTREAM_DIR="upstream_temp_clone_for_submodules"
-
           echo "Cloning upstream ${UPSTREAM_REPO_URL} (branch ${UPSTREAM_BRANCH}) into ${TEMP_UPSTREAM_DIR}..."
-          # Clone without initializing submodules here, just need .gitmodules and submodule content later
           git clone --branch "${UPSTREAM_BRANCH}" --depth 1 --no-recurse-submodules "${UPSTREAM_REPO_URL}" "${TEMP_UPSTREAM_DIR}"
-          
           cd "${TEMP_UPSTREAM_DIR}"
           if [ -f ".gitmodules" ]; then
             echo "Initializing submodules in temporary upstream clone (recursive, depth 1)..."
-            git submodule update --init --recursive --depth 1 # Now initialize them
+            git submodule update --init --recursive --depth 1 
             echo "Submodules initialized in temporary clone."
             echo "submodules_present_in_temp_clone=true" >> $GITHUB_OUTPUT
           else
@@ -120,63 +115,112 @@ jobs:
           echo "TEMP_UPSTREAM_CLONE_PATH=${GITHUB_WORKSPACE}/${TEMP_UPSTREAM_DIR}" >> $GITHUB_OUTPUT
           cd "${GITHUB_WORKSPACE}"
 
-      - name: Clean Local Submodule Paths Before Merge
+      - name: Clean Local Submodule Paths & Commit Deletions
+        id: pre_merge_clean
         run: |
+          set -x # Enable command tracing for this step
+          echo "Current directory: $(pwd)"
           echo "Cleaning potential submodule paths in local repo before merging upstream..."
           TEMP_UPSTREAM_CLONE_PATH="${{ steps.prep_upstream_clone.outputs.TEMP_UPSTREAM_CLONE_PATH }}"
           SUBMODULES_PRESENT_IN_TEMP_CLONE="${{ steps.prep_upstream_clone.outputs.submodules_present_in_temp_clone }}"
+          changes_made_for_commit=false
+
+          echo "Listing content of 3rdparty/ before cleaning (if it exists):"
+          ls -la "${GITHUB_WORKSPACE}/3rdparty" || echo "Directory ${GITHUB_WORKSPACE}/3rdparty does not exist."
+          echo "Listing content of 3rdparty/Auto_Simulated_Universe before cleaning (if it exists):"
+          ls -la "${GITHUB_WORKSPACE}/3rdparty/Auto_Simulated_Universe" || echo "Directory ${GITHUB_WORKSPACE}/3rdparty/Auto_Simulated_Universe does not exist."
+          echo "---"
 
           if [[ "$SUBMODULES_PRESENT_IN_TEMP_CLONE" == "true" ]]; then
             if [ -f "${TEMP_UPSTREAM_CLONE_PATH}/.gitmodules" ]; then
-              # Parse .gitmodules from the TEMP_UPSTREAM_CLONE_PATH.
+              # Ensure we are in the main repository's root for git commands
+              cd "${GITHUB_WORKSPACE}"
               git -C "${TEMP_UPSTREAM_CLONE_PATH}" config --file .gitmodules --get-regexp path | awk '{ print $2 }' | while read -r submodule_path; do
-                echo "Pre-emptively cleaning path in main repo: $submodule_path"
-                target_path_in_main_repo="./${submodule_path}" # Ensure relative path context
-
-                # Remove from index if it was tracked as anything (file, gitlink, dir). Suppress errors.
-                git rm -r --cached --ignore-unmatch "$target_path_in_main_repo" >/dev/null 2>&1
-                # Clean the working directory at that path thoroughly.
-                if [ -e "$target_path_in_main_repo" ]; then # Check if file or directory exists
-                    echo "Removing existing content at $target_path_in_main_repo"
-                    rm -rf "$target_path_in_main_repo"
+                echo "Processing submodule path from upstream's .gitmodules: '${submodule_path}'"
+                
+                # Check if path exists before attempting to remove
+                if [ -e "${submodule_path}" ] || git ls-files --error-unmatch "${submodule_path}" >/dev/null 2>&1; then
+                  echo "Path '${submodule_path}' exists. Removing with 'git rm -r -f --ignore-unmatch'."
+                  # git rm -r -f will remove from both the working tree and the index.
+                  # --ignore-unmatch will prevent errors if the path (or parts of it) doesn't exist in the index.
+                  if git rm -r -f --ignore-unmatch "${submodule_path}"; then
+                    echo "Successfully executed 'git rm' for '${submodule_path}'."
+                    changes_made_for_commit=true
+                  else
+                    echo "::warning:: 'git rm -r -f --ignore-unmatch \"${submodule_path}\"' exited with non-zero status. This might be okay if path was partially untracked."
+                  fi
+                  # Verify removal from worktree
+                  if [ -e "${submodule_path}" ]; then
+                      echo "::error:: Path '${submodule_path}' still exists in working directory after 'git rm -r -f'. Forcing direct 'rm -rf'."
+                      rm -rf "${submodule_path}"
+                      if [ -e "${submodule_path}" ]; then
+                          echo "::error:: FAILED to remove '${submodule_path}' even with direct 'rm -rf'."
+                      else
+                          changes_made_for_commit=true # Mark change if rm -rf succeeded where git rm might not have fully cleaned
+                      fi
+                  fi
+                else
+                  echo "Path '${submodule_path}' does not exist in working tree and is not tracked. No 'git rm' needed."
                 fi
               done
             else
               echo "::warning:: SUBMODULES_PRESENT_IN_TEMP_CLONE was true, but ${TEMP_UPSTREAM_CLONE_PATH}/.gitmodules not found."
             fi
           else
-            echo "No submodules indicated by upstream's temp clone. No pre-emptive cleaning of specific paths needed."
+            echo "No submodules indicated by upstream's temp clone. No specific path cleaning based on .gitmodules."
           fi
           
-          # Also ensure .gitmodules from the fork is gone before merge, in case upstream removed theirs.
-          if git ls-files --error-unmatch .gitmodules >/dev/null 2>&1 || [ -f .gitmodules ]; then
-            echo "Removing .gitmodules file from main repo before merge..."
-            git rm -f --ignore-unmatch .gitmodules >/dev/null 2>&1
-            rm -f .gitmodules
+          # Clean .gitmodules from the fork as well
+          if [ -f ".gitmodules" ] || git ls-files --error-unmatch ".gitmodules" >/dev/null 2>&1; then
+            echo "Removing .gitmodules file from main repo..."
+            git rm -f --ignore-unmatch ".gitmodules"
+            rm -f ".gitmodules" # Ensure gone from worktree if untracked
+            changes_made_for_commit=true
           fi
-          echo "Local paths cleaned."
+          
+          echo "---"
+          echo "Status before committing deletions (git status --short):"
+          git status --short
+          echo "---"
+
+          if [[ "$changes_made_for_commit" == "true" ]] && ! git diff --quiet --cached; then
+            echo "Staged changes (deletions/removals) found. Committing them."
+            git commit -m "BOT: Clean/remove paths corresponding to upstream submodules before merge"
+            echo "deletions_committed=true" >> $GITHUB_OUTPUT
+            echo "Status after committing deletions:"
+            git status --short
+          else
+            echo "No staged changes to commit from cleaning step, or no paths were marked for cleaning that resulted in staged changes."
+            echo "deletions_committed=false" >> $GITHUB_OUTPUT
+          fi
+          echo "---"
+          echo "Listing content of 3rdparty/Auto_Simulated_Universe after cleaning and potential commit (if it exists):"
+          ls -la "${GITHUB_WORKSPACE}/3rdparty/Auto_Simulated_Universe" || echo "Directory ${GITHUB_WORKSPACE}/3rdparty/Auto_Simulated_Universe does not exist after cleaning."
+          echo "---"
+          set +x
 
 
       - name: Merge Upstream (Prefer Upstream on Conflict)
         run: |
           BRANCH="${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}"
           UPSTREAM_BRANCH="${{ steps.sync_params.outputs.UPSTREAM_BRANCH }}"
+          echo "Current Git status before merge:"
+          git status --short
+          echo "---"
           echo "Merging upstream/${UPSTREAM_BRANCH} into ${BRANCH}..."
-          # --no-ff creates a merge commit, --no-commit stages changes allowing further processing
           git merge "upstream/${UPSTREAM_BRANCH}" -X theirs --no-ff --no-commit --allow-unrelated-histories
           echo "Merge command executed. Changes from merge are staged. Submodule processing will follow before commit."
 
       - name: Flatten/Inline Submodules from Upstream Clone
         id: flatten_submodules
         run: |
+          # ... (logic remains largely the same, ensure it correctly handles paths) ...
           echo "Attempting to inline submodules using content from temporary upstream clone..."
           changes_made_in_flatten=false
           TEMP_UPSTREAM_CLONE_PATH="${{ steps.prep_upstream_clone.outputs.TEMP_UPSTREAM_CLONE_PATH }}"
           SUBMODULES_PRESENT_IN_TEMP_CLONE="${{ steps.prep_upstream_clone.outputs.submodules_present_in_temp_clone }}"
 
           echo "De-initializing any submodule configurations that might have been merged in..."
-          # This will remove any .git entries for submodules and convert them to plain directories if they had content,
-          # or remove the gitlinks if they were just pointers.
           git submodule deinit --all -f 
 
           if [[ "$SUBMODULES_PRESENT_IN_TEMP_CLONE" != "true" ]]; then
@@ -187,27 +231,26 @@ jobs:
             if [ ! -f "${TEMP_UPSTREAM_CLONE_PATH}/.gitmodules" ]; then
                  echo "::warning:: SUBMODULES_PRESENT_IN_TEMP_CLONE was true, but ${TEMP_UPSTREAM_CLONE_PATH}/.gitmodules not found. This is unexpected."
             else
+                cd "${GITHUB_WORKSPACE}" # Ensure context
                 git -C "${TEMP_UPSTREAM_CLONE_PATH}" config --file .gitmodules --get-regexp path | awk '{ print $2 }' | while read -r submodule_path; do
                   echo "Processing submodule defined in upstream: $submodule_path"
-                  target_submodule_path_in_main_repo="./${submodule_path}"
+                  # target_submodule_path_in_main_repo="./${submodule_path}" # Not strictly needed if $submodule_path is already relative
                   source_submodule_content_path="${TEMP_UPSTREAM_CLONE_PATH}/${submodule_path}"
 
-                  echo "Ensuring target path '$target_submodule_path_in_main_repo' is clean in main repo..."
-                  # Remove from index if it's still tracked somehow (e.g. as an empty dir after deinit)
-                  git rm -r --cached --ignore-unmatch "$target_submodule_path_in_main_repo" >/dev/null 2>&1
-                  # Physically clean the directory again, just in case deinit left an empty folder
-                  rm -rf "$target_submodule_path_in_main_repo"
+                  echo "Ensuring target path '$submodule_path' is clean in main repo..."
+                  git rm -r --cached -f --ignore-unmatch "$submodule_path" >/dev/null 2>&1
+                  rm -rf "$submodule_path"
 
-                  if [ -d "$source_submodule_content_path" ] && [ -n "$(ls -A "$source_submodule_content_path")" ]; then # Check if dir exists and is not empty
-                    echo "Copying content from ${source_submodule_content_path} to ${target_submodule_path_in_main_repo}..."
-                    mkdir -p "$(dirname "$target_submodule_path_in_main_repo")"
-                    rsync -a --delete --exclude='.git/' "${source_submodule_content_path}/" "${target_submodule_path_in_main_repo}/"
+                  if [ -d "$source_submodule_content_path" ] && [ -n "$(ls -A "$source_submodule_content_path" 2>/dev/null)" ]; then 
+                    echo "Copying content from ${source_submodule_content_path} to ${submodule_path}..."
+                    mkdir -p "$(dirname "$submodule_path")"
+                    rsync -a --delete --exclude='.git/' "${source_submodule_content_path}/" "${submodule_path}/"
 
-                    echo "Staging content of former submodule at $target_submodule_path_in_main_repo"
-                    git add "$target_submodule_path_in_main_repo"
+                    echo "Staging content of former submodule at $submodule_path"
+                    git add "$submodule_path"
                     changes_made_in_flatten=true
                   else
-                    echo "::warning::Submodule content for '${submodule_path}' not found at '${source_submodule_content_path}' or is empty. It might be an empty submodule or an issue with its initialization in the temp clone."
+                    echo "::warning::Submodule content for '${submodule_path}' not found at '${source_submodule_content_path}' or is empty."
                   fi
                 done
             fi
@@ -215,8 +258,8 @@ jobs:
 
           if git ls-files --error-unmatch .gitmodules >/dev/null 2>&1 || [ -f .gitmodules ]; then
             echo "Removing .gitmodules file from main repo (post-flattening)..."
-            git rm -f --ignore-unmatch .gitmodules >/dev/null 2>&1 # from index
-            rm -f .gitmodules     # from worktree
+            git rm -f --ignore-unmatch .gitmodules 
+            rm -f .gitmodules     
             changes_made_in_flatten=true 
           else
             echo "No .gitmodules file found in the main repo to remove (post-flattening)."
@@ -228,6 +271,7 @@ jobs:
       - name: Clean Up Temporary Upstream Clone
         if: always() 
         run: |
+          # ... (logic remains the same) ...
           TEMP_UPSTREAM_CLONE_PATH="${{ steps.prep_upstream_clone.outputs.TEMP_UPSTREAM_CLONE_PATH }}"
           if [ -n "$TEMP_UPSTREAM_CLONE_PATH" ] && [ -d "$TEMP_UPSTREAM_CLONE_PATH" ]; then
             echo "Removing temporary upstream clone at ${TEMP_UPSTREAM_CLONE_PATH}..."
@@ -239,7 +283,7 @@ jobs:
       - name: Commit Changes
         id: commit
         run: |
-          # Check for unmerged paths from the merge step (should not happen with -X theirs but good check)
+          # ... (logic remains the same) ...
           if ! git diff --name-only --diff-filter=U --quiet; then
             echo "::error::Unmerged paths found after 'git merge -X theirs'! This is unexpected."
             git status --short
@@ -254,15 +298,11 @@ jobs:
           if [[ "${{ steps.flatten_submodules.outputs.changes_made_in_flatten }}" == "true" ]]; then
             FINAL_COMMIT_MSG="${COMMIT_MSG_BASE}}, and inlined submodules"
           fi
-
-          # Check if there are any staged changes.
-          # `git diff --quiet --cached` exits with 0 if no staged changes, 1 if there are.
+          
+          # If pre_merge_clean made a commit, we might want to amend it or just make a new one.
+          # For simplicity, we'll make a new one. The history will show the explicit cleaning step.
           if git diff --quiet --cached; then
-            # Also check for untracked files that should have been added (e.g. new flattened submodules)
-            # or working tree changes that were not staged.
-            # However, all our operations should be staging changes.
-            # This condition means merge + flattening resulted in no net change compared to HEAD before merge.
-            echo "No changes staged for commit. Fork is likely already up-to-date and submodules correctly flattened."
+            echo "No changes staged for commit. Fork is likely already up-to-date and submodules correctly flattened, or only pre-cleaning commit was made."
             echo "committed=false" >> $GITHUB_OUTPUT
           else
             echo "Staged changes detected. Committing with message: '${FINAL_COMMIT_MSG}'"
@@ -272,22 +312,20 @@ jobs:
           fi
 
       - name: Push Branch Changes
-        if: steps.commit.outputs.committed == 'true'
+        if: steps.commit.outputs.committed == 'true' || steps.pre_merge_clean.outputs.deletions_committed == 'true'
         run: |
           BRANCH="${{ steps.sync_params.outputs.BRANCH_TO_SYNC }}"
           echo "Pushing branch changes to origin/${BRANCH}..."
           git push origin "${BRANCH}"
 
       - name: No Branch Changes to Push
-        if: steps.commit.outputs.committed == 'false'
-        run: echo "No branch changes were committed, so no branch push is necessary."
+        if: steps.commit.outputs.committed == 'false' && steps.pre_merge_clean.outputs.deletions_committed == 'false'
+        run: echo "No branch changes were committed (neither from sync nor pre-cleaning), so no branch push is necessary."
 
       - name: Push Synced Tags to Fork
-        # Always try to push tags, as upstream tags might have been fetched even if no branch changes
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW }} 
         run: |
+          # ... (logic remains the same) ...
           echo "Pushing all local tags (synced from upstream) to origin using PAT..."
-          # --force is used because upstream might have force-pushed tags or deleted tags
-          # which we want to reflect in the fork.
-          git push origin --tags --force
+          git push origin --tags --force 
